@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Список покупок</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, push, onValue, update, remove, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ╔══════════════════════════════════════════════════════╗
+  // ║  ЗАМЕНИ ЭТИ ДАННЫЕ НА СВОИ ИЗ FIREBASE CONSOLE!     ║
+  // ║  console.firebase.google.com → твой проект →         ║
+  // ║  Project Settings → Your apps → firebaseConfig       ║
+  // ╚══════════════════════════════════════════════════════╝
+  const firebaseConfig = {
+    apiKey:            "AIzaSyBiN-hF-ehtf6HhEAa9JaBIkMFSqngoUSQ",
+    authDomain:        "shopping-list-249f7.firebaseapp.com",
+    databaseURL:       "https://shopping-list-249f7-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId:         "shopping-list-249f7",
+    storageBucket:     "shopping-list-249f7.firebasestorage.app",
+    messagingSenderId: "227826452149",
+    appId:             "1:227826452149:web:20a39b8662876047b560fc"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+  const listRef = ref(db, "shopping");
+
+  // Telegram user
+  const tg   = window.Telegram?.WebApp;
+  const user = tg?.initDataUnsafe?.user;
+  const WHO  = user ? (user.first_name || user.username || "Кто-то") : "Я";
+
+  if (tg) { tg.ready(); tg.expand(); }
+
+  /* ── helpers ── */
+  function $(id) { return document.getElementById(id); }
+
+  function fmt(ts) {
+    if (!ts) return "";
+    const d = new Date(ts), now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
+    }
+    return d.toLocaleDateString("ru", { day: "numeric", month: "short" });
+  }
+
+  /* ── render ── */
+  function renderList(items) {
+    const entries = Object.entries(items || {}).sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+    const pending = entries.filter(([, v]) => !v.done);
+    const bought  = entries.filter(([, v]) =>  v.done);
+    const total   = entries.length;
+    const doneN   = bought.length;
+
+    // stats
+    $("statLeft").textContent  = pending.length;
+    $("statDone").textContent  = doneN;
+    const pct = total ? Math.round(doneN / total * 100) : 0;
+    $("progressFill").style.width = pct + "%";
+    $("progressPct").textContent  = pct + "%";
+
+    const ul = $("itemList");
+    ul.innerHTML = "";
+
+    if (entries.length === 0) {
+      $("emptyState").style.display = "flex";
+    } else {
+      $("emptyState").style.display = "none";
+    }
+
+    // pending first, then bought
+    [...pending, ...bought].forEach(([key, val]) => {
+      const li = document.createElement("li");
+      li.className = "item" + (val.done ? " done" : "");
+
+      li.innerHTML = `
+        <button class="row-tap" aria-label="toggle"></button>
+        <div class="circle ${val.done ? "checked" : ""}">
+          <svg class="check-svg" viewBox="0 0 18 14" fill="none">
+            <path d="M1.5 7L6.5 12L16.5 2" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="item-body">
+          <span class="item-name">${escHtml(val.name)}</span>
+          <span class="item-meta">${val.who ? escHtml(val.who) : ""}${val.done && val.doneBy ? " · купил(а) " + escHtml(val.doneBy) : ""}${val.ts ? " · " + fmt(val.ts) : ""}</span>
+        </div>
+        <button class="btn-del" aria-label="delete">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>
+          </svg>
+        </button>
+      `;
+
+      li.querySelector(".row-tap").addEventListener("click", () => {
+        update(ref(db, "shopping/" + key), {
+          done:   !val.done,
+          doneBy: !val.done ? WHO : null
+        });
+        if (!val.done && tg?.HapticFeedback)
+          tg.HapticFeedback.notificationOccurred("success");
+      });
+
+      li.querySelector(".btn-del").addEventListener("click", (e) => {
+        e.stopPropagation();
+        remove(ref(db, "shopping/" + key));
+        if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred("medium");
+      });
+
+      ul.appendChild(li);
+    });
+  }
+
+  /* ── add item ── */
+  function addItem() {
+    const inp = $("inputName");
+    const name = inp.value.trim();
+    if (!name) { inp.focus(); inp.classList.add("shake"); setTimeout(() => inp.classList.remove("shake"), 400); return; }
+    push(listRef, { name, who: WHO, done: false, ts: Date.now() });
+    inp.value = "";
+    inp.focus();
+    if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred("light");
+  }
+
+  function escHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ── clear bought ── */
+  window._clearBought = function() {
+    // read current then delete done
+    onValue(listRef, snap => {
+      const data = snap.val() || {};
+      Object.entries(data).forEach(([k, v]) => {
+        if (v.done) remove(ref(db, "shopping/" + k));
+      });
+    }, { onlyOnce: true });
+  };
+
+  /* ── live listener ── */
+  onValue(listRef, snap => {
+    $("loader").style.display = "none";
+    renderList(snap.val());
+  });
+
+  /* ── DOM events ── */
+  window.addEventListener("DOMContentLoaded", () => {
+    $("btnAdd").addEventListener("click", addItem);
+    $("inputName").addEventListener("keydown", e => { if (e.key === "Enter") addItem(); });
+    $("btnClearDone").addEventListener("click", window._clearBought);
+  });
+</script>
+
+<style>
+:root {
+  --bg:        #f7f6f3;
+  --surface:   #ffffff;
+  --border:    #e8e5df;
+  --text:      #1c1a17;
+  --muted:     #9b9488;
+  --accent:    #e8622a;
+  --accent-dk: #c44f1c;
+  --green:     #2dba76;
+  --done-line: #b8b2a8;
+  --radius:    16px;
+  --shadow:    0 2px 16px rgba(0,0,0,0.07);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:      #181614;
+    --surface: #221f1c;
+    --border:  #2e2b27;
+    --text:    #f0ede8;
+    --muted:   #6b6560;
+    --done-line: #4a453f;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+body {
+  font-family: 'Manrope', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 480px;
+  margin: 0 auto;
+  padding-bottom: 96px;
+}
+
+/* ── Header ── */
+.header {
+  padding: 20px 20px 0;
+  display: flex; align-items: flex-end; justify-content: space-between;
+}
+.header-title {
+  font-size: 28px; font-weight: 800;
+  letter-spacing: -1px; line-height: 1;
+}
+.header-title em {
+  font-style: normal;
+  color: var(--accent);
+}
+.header-stats {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+}
+.pill {
+  background: var(--accent);
+  color: #fff; font-size: 12px; font-weight: 800;
+  padding: 3px 10px; border-radius: 20px;
+}
+.pill.green { background: var(--green); }
+
+/* ── Progress ── */
+.progress-wrap {
+  margin: 14px 20px 0;
+  display: flex; align-items: center; gap: 10px;
+}
+.progress-bar {
+  flex: 1; height: 4px;
+  background: var(--border); border-radius: 4px; overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #f0a060);
+  border-radius: 4px;
+  transition: width 0.5s cubic-bezier(.4,0,.2,1);
+}
+.progress-pct { font-size: 12px; font-weight: 700; color: var(--muted); min-width: 36px; text-align: right; }
+
+/* ── Input ── */
+.input-wrap {
+  margin: 18px 20px 0;
+  display: flex; gap: 10px;
+}
+.input-field {
+  flex: 1;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 16px; font-weight: 600;
+  color: var(--text); outline: none;
+  transition: border-color 0.18s, box-shadow 0.18s;
+  box-shadow: var(--shadow);
+}
+.input-field::placeholder { color: var(--muted); font-weight: 500; }
+.input-field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,98,42,0.12); }
+.input-field.shake { animation: shake 0.35s ease; }
+@keyframes shake {
+  0%,100%{transform:translateX(0)}
+  20%{transform:translateX(-6px)}
+  40%{transform:translateX(6px)}
+  60%{transform:translateX(-4px)}
+  80%{transform:translateX(4px)}
+}
+
+.btn-add {
+  width: 52px; height: 52px; flex-shrink: 0;
+  background: var(--accent);
+  border: none; border-radius: var(--radius);
+  color: #fff; font-size: 28px; font-weight: 300;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 14px rgba(232,98,42,0.35);
+  transition: transform 0.12s, box-shadow 0.18s;
+}
+.btn-add:active { transform: scale(0.91); box-shadow: 0 2px 6px rgba(232,98,42,0.2); }
+
+/* ── Divider ── */
+.divider {
+  margin: 20px 20px 0;
+  display: flex; align-items: center; gap: 10px;
+}
+.divider span {
+  font-size: 11px; font-weight: 800; letter-spacing: 1.4px;
+  color: var(--muted); text-transform: uppercase; white-space: nowrap;
+}
+.divider::before, .divider::after {
+  content:''; flex:1; height:1px; background: var(--border);
+}
+
+/* ── List ── */
+.list-wrap { margin: 10px 20px 0; }
+ul#itemList { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+
+/* ── Item ── */
+.item {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 14px 14px 16px;
+  position: relative; overflow: hidden;
+  transition: opacity 0.25s, border-color 0.25s;
+  animation: fadeSlide 0.26s ease;
+}
+@keyframes fadeSlide {
+  from { opacity:0; transform:translateY(-10px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+.item.done { opacity: 0.55; }
+
+/* invisible full-row tap area */
+.row-tap {
+  position: absolute; inset: 0; background: none; border: none;
+  cursor: pointer; z-index: 1;
+}
+
+/* ── Circle checkbox ── */
+.circle {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s, border-color 0.2s;
+  background: transparent; position: relative; z-index: 2;
+  pointer-events: none;
+}
+.circle.checked { background: var(--green); border-color: var(--green); }
+.check-svg { width: 13px; opacity: 0; transition: opacity 0.2s; color: #fff; }
+.circle.checked .check-svg { opacity: 1; }
+
+/* ── Item body ── */
+.item-body { flex: 1; min-width: 0; pointer-events: none; }
+.item-name {
+  display: block; font-size: 15px; font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 0.22s, text-decoration 0.22s;
+}
+.item.done .item-name {
+  text-decoration: line-through;
+  text-decoration-color: var(--done-line);
+  color: var(--muted);
+}
+.item-meta {
+  display: block; font-size: 11px; font-weight: 500;
+  color: var(--muted); margin-top: 2px;
+}
+
+/* ── Delete button ── */
+.btn-del {
+  width: 32px; height: 32px; flex-shrink: 0;
+  background: none; border: none; cursor: pointer;
+  border-radius: 10px; color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  position: relative; z-index: 2;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-del svg { width: 16px; height: 16px; }
+.btn-del:active { color: #e84040; background: rgba(232,64,64,0.1); }
+
+/* ── Empty state ── */
+#emptyState {
+  display: none; flex-direction: column; align-items: center;
+  padding: 48px 20px; gap: 12px; color: var(--muted);
+  text-align: center;
+}
+.empty-icon { font-size: 48px; }
+.empty-text { font-size: 15px; font-weight: 600; line-height: 1.5; }
+.empty-text strong { color: var(--accent); font-weight: 800; }
+
+/* ── Loader ── */
+#loader {
+  display: flex; justify-content: center; padding: 40px;
+}
+.spinner {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to{ transform:rotate(360deg); } }
+
+/* ── Bottom bar ── */
+.bottom-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  max-width: 480px; margin: 0 auto;
+  background: var(--surface);
+  border-top: 1.5px solid var(--border);
+  padding: 12px 20px 24px;
+  display: flex; align-items: center; justify-content: flex-end;
+  z-index: 100;
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.06);
+}
+.btn-clear {
+  background: none;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px; font-weight: 700;
+  color: var(--muted); cursor: pointer;
+  transition: all 0.18s;
+}
+.btn-clear:active { border-color: #e84040; color: #e84040; background: rgba(232,64,64,0.07); }
+
+/* ── Config banner ── */
+.config-banner {
+  margin: 16px 20px 0;
+  background: #fff7ed;
+  border: 1.5px solid #fdba74;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 13px; font-weight: 600; color: #9a3412;
+  line-height: 1.5;
+}
+.config-banner strong { display: block; margin-bottom: 4px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-title">Наш список<em>.</em></div>
+    <div class="header-stats">
+      <span id="statLeft">0</span> осталось
+      <span class="pill green" id="statDone">0 ✓</span>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="progress-wrap">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    <div class="progress-pct" id="progressPct">0%</div>
+  </div>
+
+  <!-- Config warning (скрывается когда Firebase настроен) -->
+  <div class="config-banner" id="configBanner">
+    <strong>⚠️ Нужно настроить Firebase</strong>
+    Открой файл и замени <code>ВСТАВЬ_СЮДА</code> на свои данные из Firebase Console.
+    Инструкция в конце файла.
+  </div>
+
+  <!-- Input -->
+  <div class="input-wrap">
+    <input class="input-field" id="inputName" type="text" placeholder="Что купить?" maxlength="80" autocomplete="off">
+    <button class="btn-add" id="btnAdd">+</button>
+  </div>
+
+  <!-- Divider -->
+  <div class="divider"><span>Список</span></div>
+
+  <!-- Loader -->
+  <div id="loader"><div class="spinner"></div></div>
+
+  <!-- List -->
+  <div class="list-wrap">
+    <ul id="itemList"></ul>
+    <div id="emptyState">
+      <div class="empty-icon">🛒</div>
+      <p class="empty-text">Список пуст!<br><strong>Добавьте первую покупку</strong> выше.</p>
+    </div>
+  </div>
+
+</div>
+
+<!-- Bottom bar -->
+<div class="bottom-bar">
+  <button class="btn-clear" id="btnClearDone">Удалить купленное</button>
+</div>
+
+<!--
+╔══════════════════════════════════════════════════════════════════╗
+║              КАК НАСТРОИТЬ FIREBASE (разово, 5 мин)             ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  1. Перейди на console.firebase.google.com                       ║
+║  2. "Add project" → придумай название → создай                   ║
+║  3. Слева: Build → Realtime Database → Create database           ║
+║     → выбери регион Europe → Start in TEST mode (потом           ║
+║     можно защитить правилами)                                    ║
+║  4. Слева: Project Settings (шестерёнка) → General →            ║
+║     листай вниз → Your apps → нажми </> (Web)                   ║
+║  5. Назови приложение, нажми Register App                        ║
+║  6. Скопируй объект firebaseConfig и замени ВСТАВЬ_СЮДА          ║
+║     в этом файле выше (внутри тега <script type="module">)       ║
+║                                                                  ║
+║  Всё! Список синхронизируется в реальном времени между всеми!   ║
+║                                                                  ║
+║  TELEGRAM BOT:                                                   ║
+║  1. Залей этот файл как index.html на GitHub Pages               ║
+║     (repo → Settings → Pages → Deploy from branch)              ║
+║  2. Напиши @BotFather → /mybots → твой бот →                    ║
+║     Bot Settings → Menu Button → задай URL страницы             ║
+╚══════════════════════════════════════════════════════════════════╝
+-->
+
+<script>
+  // Hide config banner if Firebase was configured
+  document.addEventListener("DOMContentLoaded", () => {
+    const scripts = document.querySelectorAll("script[type='module']");
+    const src = Array.from(scripts).map(s => s.textContent).join("");
+    if (!src.includes("ВСТАВЬ_СЮДА")) {
+      document.getElementById("configBanner").style.display = "none";
+    }
+  });
+</script>
+</body>
+</html>
