@@ -39,6 +39,30 @@
 
   if (tg) { tg.ready(); tg.expand(); }
 
+  // ── Защита по Telegram ID ──
+  const ALLOWED_IDS = [878972088, 1004460893];
+  const userId = user?.id;
+
+  // Если открыто в Telegram и ID не в списке — показать заглушку
+  if (tg && userId && !ALLOWED_IDS.includes(userId)) {
+    document.addEventListener("DOMContentLoaded", () => {
+      document.body.innerHTML = `
+        <div style="
+          display:flex; flex-direction:column; align-items:center;
+          justify-content:center; min-height:100vh; gap:16px;
+          font-family:'Manrope',sans-serif; text-align:center;
+          background:#f7f6f3; color:#1c1a17; padding:32px;
+        ">
+          <div style="font-size:56px">🔒</div>
+          <div style="font-size:20px; font-weight:800;">Нет доступа</div>
+          <div style="font-size:14px; color:#9b9488; font-weight:500; max-width:260px; line-height:1.6;">
+            Это семейный список покупок.<br>Доступ только для своих 🙂
+          </div>
+        </div>`;
+    });
+    throw new Error("Access denied");
+  }
+
   /* ── helpers ── */
   function $(id) { return document.getElementById(id); }
 
